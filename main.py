@@ -19,19 +19,42 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")  # example: https://xxxx.supabase.co
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
+# بدل ما نطيّح السيرفر بـ RuntimeError، نطبع تحذير فقط
+missing_vars = []
 if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY is not set")
+    missing_vars.append("OPENAI_API_KEY")
+if not SUPABASE_URL:
+    missing_vars.append("SUPABASE_URL")
+if not SUPABASE_SERVICE_ROLE_KEY:
+    missing_vars.append("SUPABASE_SERVICE_ROLE_KEY")
 
-if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-    raise RuntimeError("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is not set")
+if missing_vars:
+    print("WARNING: Missing environment variables:", ", ".join(missing_vars))
 
-# REST base URL
-SUPABASE_REST_URL = SUPABASE_URL.rstrip("/") + "/rest/v1"
+# REST base URL (لو ما فيه SUPABASE_URL نخليه فاضي ونتعامل معه داخل الفنكشنز)
+SUPABASE_REST_URL = (
+    SUPABASE_URL.rstrip("/") + "/rest/v1" if SUPABASE_URL else ""
+)
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+# نهيّئ عميل OpenAI لو المفتاح موجود
+client: Optional[OpenAI]
+if OPENAI_API_KEY:
+    client = OpenAI(api_key=OPENAI_API_KEY)
+else:
+    client = None
 
 
 def supabase_headers() -> Dict[str, str]:
+    """
+    يرجع الهيدرز الجاهزة لـ Supabase REST.
+    لو المتغيرات ناقصة يرجع Error واضح بدل ما يطيح السيرفر.
+    """
+    if not SUPABASE_SERVICE_ROLE_KEY or not SUPABASE_REST_URL:
+        raise HTTPException(
+            status_code=500,
+            detail="Server configuration error: Supabase env vars are missing.",
+        )
+
     return {
         "apikey": SUPABASE_SERVICE_ROLE_KEY,
         "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
@@ -123,6 +146,12 @@ class UserProfile(BaseModel):
 # Helpers مع Supabase REST
 # =========================================
 def get_user_by_email(email: str) -> Optional[Dict]:
+    if not SUPABASE_REST_URL:
+        raise HTTPException(
+            status_code=500,
+            detail="Server configuration error: SUPABASE_URL is missing.",
+        )
+
     url = f"{SUPABASE_REST_URL}/users"
     params = {
         "select": "id,name,email,phone",
@@ -140,6 +169,12 @@ def get_user_by_email(email: str) -> Optional[Dict]:
 
 
 def create_user(name: str, email: str, phone: Optional[str]) -> str:
+    if not SUPABASE_REST_URL:
+        raise HTTPException(
+            status_code=500,
+            detail="Server configuration error: SUPABASE_URL is missing.",
+        )
+
     url = f"{SUPABASE_REST_URL}/users"
     payload = [{"name": name, "email": email, "phone": phone}]
     resp = requests.post(url, headers=supabase_headers(), json=payload)
@@ -152,6 +187,12 @@ def create_user(name: str, email: str, phone: Optional[str]) -> str:
 
 
 def update_user(user_id: str, name: str, phone: Optional[str]) -> None:
+    if not SUPABASE_REST_URL:
+        raise HTTPException(
+            status_code=500,
+            detail="Server configuration error: SUPABASE_URL is missing.",
+        )
+
     url = f"{SUPABASE_REST_URL}/users"
     params = {"id": f"eq.{user_id}"}
     payload = {"name": name, "phone": phone}
@@ -169,6 +210,12 @@ def insert_assessment(
     bench_scores: Dict[str, int],
     ai_report: str,
 ) -> None:
+    if not SUPABASE_REST_URL:
+        raise HTTPException(
+            status_code=500,
+            detail="Server configuration error: SUPABASE_URL is missing.",
+        )
+
     url = f"{SUPABASE_REST_URL}/assessments"
     payload = [
         {
@@ -189,6 +236,12 @@ def insert_assessment(
 
 
 def fetch_profile_from_supabase(user_id: str) -> UserProfile:
+    if not SUPABASE_REST_URL:
+        raise HTTPException(
+            status_code=500,
+            detail="Server configuration error: SUPABASE_URL is missing.",
+        )
+
     # User
     url_user = f"{SUPABASE_REST_URL}/users"
     params_user = {
@@ -197,7 +250,11 @@ def fetch_profile_from_supabase(user_id: str) -> UserProfile:
     }
     resp_user = requests.get(url_user, headers=supabase_headers(), params=params_user)
     if not resp_user.ok:
-        print("Supabase fetch_profile user ERROR:", resp_user.status_code, resp_user.text)
+        print(
+            "Supabase fetch_profile user ERROR:",
+            resp_user.status_code,
+            resp_user.text,
+        )
         raise HTTPException(status_code=500, detail="Supabase error (get user)")
 
     user_data = resp_user.json()
@@ -258,6 +315,12 @@ def analyze_user(name: str, track: str, answers: List[Dict]) -> Dict:
     """
     answers: list of {"text": "..", "skill": "Technical", "score": 1..5}
     """
+    if client is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Server configuration error: OPENAI_API_KEY is missing.",
+        )
+
     # 1) تجميع الدرجات لكل skill
     buckets: Dict[str, List[int]] = {}
     for a in answers:
@@ -271,7 +334,11 @@ def analyze_user(name: str, track: str, answers: List[Dict]) -> Dict:
         avg = sum(vals) / len(vals)
         skill_scores[skill] = round((avg / 5.0) * 100.0, 1)
 
-    overall = round(sum(skill_scores.values()) / len(skill_scores), 1) if skill_scores else 0.0
+    overall = (
+        round(sum(skill_scores.values()) / len(skill_scores), 1)
+        if skill_scores
+        else 0.0
+    )
     bench_scores = BENCHMARKS.get(track, {})
 
     # 3) تجهيز برومبت GPT
@@ -384,7 +451,9 @@ async def analyze_endpoint(payload: AnalyzePayload):
                 track=payload.track,
                 overall_score=result["overallScore"],
                 skill_scores=result["skillScores"],
-                bench_scores=result["benchScores"],
+                bench_scores=result["BenchScores"]
+                if "BenchScores" in result
+                else result["benchScores"],
                 ai_report=result["aiReport"],
             )
     except HTTPException:

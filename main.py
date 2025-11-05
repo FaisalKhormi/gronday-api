@@ -1,45 +1,35 @@
 # main.py
 from typing import List, Dict, Optional
-from datetime import datetime
 import os
+from datetime import datetime
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 from dotenv import load_dotenv
 from openai import OpenAI
 from supabase import create_client, Client
 
 # =========================================
-# إعداد .env + مفاتيح OpenAI
+# تحميل المتغيرات من .env (محلياً) + بيئة Render
 # =========================================
-load_dotenv()  # يقرأ ملف .env محلياً (للتجربة)
+load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise RuntimeError(
-        "OPENAI_API_KEY is not set. "
-        "Set it in your cloud environment variables or .env file."
-    )
-
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-# =========================================
-# إعداد Supabase (الديتاوير هاوس)
-# =========================================
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
-if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-    raise RuntimeError(
-        "Supabase config missing: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY.\n"
-        "Set them as environment variables in Render and/or .env."
-    )
+if not OPENAI_API_KEY:
+    raise RuntimeError("OPENAI_API_KEY is not set.")
 
+if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+    raise RuntimeError("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is not set.")
+
+client = OpenAI(api_key=OPENAI_API_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 # =========================================
-# بيانات المقارنة (Benchmark Scores)
+# بيانات الـ Benchmark (ممكن تطورها لاحقاً)
 # =========================================
 BENCHMARKS: Dict[str, Dict[str, int]] = {
     "Data Analyst": {
@@ -65,7 +55,7 @@ BENCHMARKS: Dict[str, Dict[str, int]] = {
 }
 
 # =========================================
-# Pydantic Models
+# نماذج الـ Pydantic
 # =========================================
 class Answer(BaseModel):
     text: str
@@ -78,9 +68,9 @@ class AnalyzePayload(BaseModel):
     track: str
     answers: List[Answer]
 
-    # معلومات المستخدم (اختيارية، للربط مع البروفايل)
+    # معلومات العميل (تجي من الـ pop-up)
     userId: Optional[str] = None
-    email: Optional[EmailStr] = None
+    email: Optional[str] = None
     phone: Optional[str] = None
 
 
@@ -91,13 +81,13 @@ class AnalyzeResponse(BaseModel):
     aiReport: str
 
 
-class SignupLitePayload(BaseModel):
+class SignupPayload(BaseModel):
     name: str
-    email: EmailStr
+    email: str
     phone: Optional[str] = None
 
 
-class SignupLiteResponse(BaseModel):
+class SignupResponse(BaseModel):
     userId: str
 
 
@@ -112,147 +102,41 @@ class AssessmentSummary(BaseModel):
 class UserProfile(BaseModel):
     id: str
     name: str
-    email: EmailStr
+    email: str
     phone: Optional[str]
     assessments: List[AssessmentSummary]
 
 
 # =========================================
-# دوال التعامل مع Supabase
-# =========================================
-def get_or_create_user(name: str, email: str, phone: Optional[str] = None) -> str:
-    """
-    يرجع user_id من جدول users.
-    إذا الإيميل موجود يرجع نفس المستخدم، وإذا غير موجود ينشئ مستخدم جديد.
-    """
-    resp = supabase.table("users").select("id, name, email, phone") \
-        .eq("email", email).limit(1).execute()
-
-    data = resp.data or []
-    if data:
-        # ممكن نحدّث الاسم/الجوال لو حاب
-        user = data[0]
-        update_payload = {}
-        if name and name != user.get("name"):
-            update_payload["name"] = name
-        if phone and phone != user.get("phone"):
-            update_payload["phone"] = phone
-
-        if update_payload:
-            supabase.table("users").update(update_payload).eq("id", user["id"]).execute()
-
-        return str(user["id"])
-
-    # ما فيه مستخدم بهالإيميل → ننشئ واحد
-    insert_resp = supabase.table("users").insert(
-        {
-            "name": name,
-            "email": email,
-            "phone": phone,
-        }
-    ).execute()
-
-    if not insert_resp.data:
-        raise RuntimeError("Failed to create user in Supabase.")
-
-    return str(insert_resp.data[0]["id"])
-
-
-def save_assessment(
-    user_id: Optional[str],
-    track: str,
-    result: Dict,
-) -> None:
-    """
-    يحفظ نتيجة التقييم في جدول assessments لو فيه user_id.
-    """
-    if not user_id:
-        # لو ما عندنا user_id (زائر بدون تسجيل)، نتجاوز التخزين بهدوء
-        return
-
-    supabase.table("assessments").insert(
-        {
-            "user_id": user_id,
-            "track": track,
-            "overall_score": result["overallScore"],
-            "skill_scores": result["skillScores"],
-            "bench_scores": result["benchScores"],
-            "ai_report": result["aiReport"],
-        }
-    ).execute()
-
-
-def get_user_profile(user_id: str) -> UserProfile:
-    # نجيب بيانات المستخدم
-    user_resp = supabase.table("users").select(
-        "id, name, email, phone"
-    ).eq("id", user_id).limit(1).execute()
-
-    if not user_resp.data:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    user = user_resp.data[0]
-
-    # نجيب آخر الاختبارات
-    assessments_resp = (
-        supabase.table("assessments")
-        .select("id, created_at, track, overall_score, skill_scores")
-        .eq("user_id", user_id)
-        .order("created_at", desc=True)
-        .execute()
-    )
-
-    assessments_list: List[AssessmentSummary] = []
-    for row in assessments_resp.data or []:
-        assessments_list.append(
-            AssessmentSummary(
-                id=row["id"],
-                created_at=datetime.fromisoformat(
-                    row["created_at"].replace("Z", "+00:00")
-                ),
-                track=row["track"],
-                overallScore=row["overall_score"],
-                skillScores=row["skill_scores"],
-            )
-        )
-
-    return UserProfile(
-        id=str(user["id"]),
-        name=user["name"],
-        email=user["email"],
-        phone=user.get("phone"),
-        assessments=assessments_list,
-    )
-
-
-# =========================================
-# منطق التحليل (GPT)
+# منطق التحليل + استدعاء GPT
 # =========================================
 def analyze_user(name: str, track: str, answers: List[Dict]) -> Dict:
     """
-    answers: list of { "text": "...", "skill": "Technical", "score": 1..5 }
+    answers: list of {"text": "..", "skill": "Technical", "score": 1..5}
     """
-    # 1) حساب درجات كل skill
+    # 1) تجميع الدرجات لكل skill
     buckets: Dict[str, List[int]] = {}
     for a in answers:
         skill = a["skill"]
         score = int(a["score"])
         buckets.setdefault(skill, []).append(score)
 
+    # 2) حساب المتوسط وتحويله لـ 0–100
     skill_scores: Dict[str, float] = {}
     for skill, vals in buckets.items():
         avg = sum(vals) / len(vals)
-        # تحويل من 1–5 إلى 0–100
         skill_scores[skill] = round((avg / 5.0) * 100.0, 1)
 
-    overall = (
-        round(sum(skill_scores.values()) / len(skill_scores), 1)
-        if skill_scores
-        else 0.0
-    )
+    overall = round(sum(skill_scores.values()) / len(skill_scores), 1) if skill_scores else 0.0
     bench_scores = BENCHMARKS.get(track, {})
 
-    # 2) استدعاء GPT لكتابة تقرير مهني
+    # 3) تجهيز برومبت GPT
+    system_prompt = (
+        "You are a senior career coach in the GCC market. "
+        "Answer in modern Arabic with a Saudi/GCC tone. "
+        "Be structured, clear, and practical."
+    )
+
     payload = {
         "name": name,
         "track": track,
@@ -260,12 +144,6 @@ def analyze_user(name: str, track: str, answers: List[Dict]) -> Dict:
         "skill_scores": skill_scores,
         "bench_scores": bench_scores,
     }
-
-    system_prompt = (
-        "You are a senior career coach in the GCC market. "
-        "Answer in modern Arabic with a Saudi/GCC tone. "
-        "Be structured, clear, and practical."
-    )
 
     user_prompt = (
         "هذي نتيجة اختبار لمهارات مهنية (اسم المستخدم، المسار المهني، الدرجات):\n"
@@ -303,13 +181,13 @@ def analyze_user(name: str, track: str, answers: List[Dict]) -> Dict:
 # =========================================
 app = FastAPI(
     title="Growday API",
-    version="1.0.0",
-    description="Backend for Growday AI Skill Assessment",
+    version="1.1.0",
+    description="Backend for Growday AI Skill Assessment + user profiles",
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # لاحقاً خله على دومين الفرونت فقط
+    allow_origins=["*"],        # بعدين حصرها على دومين الفرونت
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -324,40 +202,50 @@ def root():
     return {"status": "Growday API is running"}
 
 
-@app.post("/signup-lite", response_model=SignupLiteResponse)
-def signup_lite(payload: SignupLitePayload):
-    """
-    يستقبل الاسم + الإيميل + الجوال من الـ Pop-up
-    ويرجع userId يصلح نستخدمه في الفرونت وفي /analyze و /profile.
-    """
-    try:
-        user_id = get_or_create_user(
-            name=payload.name,
-            email=payload.email,
-            phone=payload.phone,
+# 1) /signup-lite  -> ينشئ/يحدّث مستخدم ويعيد userId
+@app.post("/signup-lite", response_model=SignupResponse)
+def signup_lite(payload: SignupPayload):
+    # نبحث عن مستخدم بنفس الإيميل
+    existing = (
+        supabase.table("users")
+        .select("id")
+        .eq("email", payload.email)
+        .maybe_single()
+        .execute()
+    )
+
+    data = existing.data
+    if data:
+        user_id = data["id"]
+        # نحدّث الاسم/الجوال لو تغيّروا
+        supabase.table("users").update(
+            {"name": payload.name, "phone": payload.phone}
+        ).eq("id", user_id).execute()
+        return {"userId": user_id}
+
+    # لو ما حصلناه، ننشئ مستخدم جديد
+    res = (
+        supabase.table("users")
+        .insert(
+            {
+                "name": payload.name,
+                "email": payload.email,
+                "phone": payload.phone,
+            }
         )
-        return SignupLiteResponse(userId=user_id)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        .execute()
+    )
+
+    if not res.data:
+        raise HTTPException(status_code=500, detail="Failed to create user")
+
+    user_id = res.data[0]["id"]
+    return {"userId": user_id}
 
 
+# 2) /analyze  -> تحليل + حفظ نتيجة الاختبار (لو فيه userId)
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze_endpoint(payload: AnalyzePayload):
-    # نحدد user_id لو متوفر
-    user_id = payload.userId
-
-    # لو ما فيه userId لكن فيه إيميل، ننشئ/نجيب المستخدم
-    if not user_id and payload.email:
-        try:
-            user_id = get_or_create_user(
-                name=payload.name,
-                email=payload.email,
-                phone=payload.phone,
-            )
-        except Exception as e:
-            # نكمل التحليل حتى لو تخزين المستخدم فشل
-            print("Supabase user error:", e)
-
     answers_list: List[Dict] = [a.dict() for a in payload.answers]
     result = analyze_user(
         name=payload.name,
@@ -365,30 +253,68 @@ async def analyze_endpoint(payload: AnalyzePayload):
         answers=answers_list,
     )
 
-    # نخزن النتيجة في جدول assessments لو عندنا user_id
-    try:
-        save_assessment(user_id=user_id, track=payload.track, result=result)
-    except Exception as e:
-        print("Supabase assessment error:", e)
+    # لو فيه userId نحفظ الاختبار في جدول assessments
+    if payload.userId:
+        supabase.table("assessments").insert(
+            {
+                "user_id": payload.userId,
+                "track": payload.track,
+                "overall_score": result["overallScore"],
+                "skill_scores": result["skillScores"],
+            }
+        ).execute()
 
     return result
 
 
+# 3) /profile/{user_id}  -> يرجّع بروفايل العميل + قائمة اختبارات
 @app.get("/profile/{user_id}", response_model=UserProfile)
-def profile_endpoint(user_id: str):
-    """
-    يرجع بروفايل المستخدم + آخر الاختبارات (للصفحة الخاصة فيه في الفرونت).
-    """
-    try:
-        profile = get_user_profile(user_id)
-        return profile
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+async def get_profile(user_id: str):
+    user_res = (
+        supabase.table("users")
+        .select("id,name,email,phone")
+        .eq("id", user_id)
+        .single()
+        .execute()
+    )
+    user = user_res.data
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    assessments_res = (
+        supabase.table("assessments")
+        .select("id,track,overall_score,skill_scores,created_at")
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    rows = assessments_res.data or []
+
+    assessments: List[AssessmentSummary] = []
+    for row in rows:
+        created_raw = row["created_at"]
+        # Supabase يعيد ISO string مثل "2025-11-05T21:00:00.000Z"
+        created_at = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+        assessments.append(
+            AssessmentSummary(
+                id=row["id"],
+                created_at=created_at,
+                track=row["track"],
+                overallScore=float(row["overall_score"]),
+                skillScores=row["skill_scores"],
+            )
+        )
+
+    return UserProfile(
+        id=user["id"],
+        name=user["name"],
+        email=user["email"],
+        phone=user.get("phone"),
+        assessments=assessments,
+    )
 
 
-# للتشغيل المحلي مباشرة: python main.py
+# للتشغيل المحلي: python main.py
 if __name__ == "__main__":
     import uvicorn
 

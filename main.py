@@ -31,7 +31,7 @@ if not SUPABASE_SERVICE_ROLE_KEY:
 if missing_vars:
     print("WARNING: Missing environment variables:", ", ".join(missing_vars))
 
-# REST base URL (لو ما فيه SUPABASE_URL نخليه فاضي ونتعامل معه داخل الفنكشنز)
+# REST base URL
 SUPABASE_REST_URL = SUPABASE_URL.rstrip("/") + "/rest/v1" if SUPABASE_URL else ""
 
 
@@ -54,7 +54,7 @@ def supabase_headers() -> Dict[str, str]:
         "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "Prefer": "return=representation",  # مهم عشان create_user يرجع id
+        "Prefer": "return=representation",
     }
 
 
@@ -152,12 +152,30 @@ def get_user_by_email(email: str) -> Optional[Dict]:
         "select": "id,name,email,phone",
         "email": f"eq.{email}",
     }
-    resp = requests.get(url, headers=supabase_headers(), params=params)
+    try:
+        resp = requests.get(url, headers=supabase_headers(), params=params, timeout=10)
+    except Exception as e:
+        print("Supabase get_user_by_email REQUEST ERROR:", repr(e))
+        raise HTTPException(
+            status_code=500, detail=f"Supabase get_user_by_email request error: {repr(e)}"
+        )
+
     if not resp.ok:
         print("Supabase get_user_by_email ERROR:", resp.status_code, resp.text)
-        raise HTTPException(status_code=500, detail="Supabase error (get user)")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Supabase get_user_by_email HTTP {resp.status_code}: {resp.text}",
+        )
 
-    data = resp.json()
+    try:
+        data = resp.json()
+    except ValueError:
+        print("Supabase get_user_by_email JSON error. Raw:", resp.text)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Supabase get_user_by_email invalid JSON: {resp.text}",
+        )
+
     if not data:
         return None
     return data[0]
@@ -167,7 +185,6 @@ def create_user(name: str, email: str, phone: Optional[str]) -> str:
     """
     ينشئ مستخدم جديد في جدول users.
     يحاول الحصول على id من رد Supabase، ولو ما رجع، يرجع يجيب المستخدم عن طريق الإيميل.
-    هذا يمنع الكراش اللي كان يسوي 500 في signup-lite.
     """
     if not SUPABASE_REST_URL:
         raise HTTPException(
@@ -177,22 +194,30 @@ def create_user(name: str, email: str, phone: Optional[str]) -> str:
 
     url = f"{SUPABASE_REST_URL}/users"
     payload = [{"name": name, "email": email, "phone": phone}]
-    resp = requests.post(url, headers=supabase_headers(), json=payload)
+    try:
+        resp = requests.post(
+            url, headers=supabase_headers(), json=payload, timeout=10
+        )
+    except Exception as e:
+        print("Supabase create_user REQUEST ERROR:", repr(e))
+        raise HTTPException(
+            status_code=500, detail=f"Supabase create_user request error: {repr(e)}"
+        )
 
     if not resp.ok:
         print("Supabase create_user ERROR:", resp.status_code, resp.text)
-        raise HTTPException(status_code=500, detail="Supabase error (create user)")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Supabase create_user HTTP {resp.status_code}: {resp.text}",
+        )
 
-    # نحاول نقرأ JSON بأمان
     data = None
-    try:
-        if resp.text.strip():
+    if resp.text.strip():
+        try:
             data = resp.json()
-    except ValueError:
-        # ما قدر يفك JSON، نطبع الرد الخام
-        print("Supabase create_user JSON decode error. Raw response:", resp.text)
+        except ValueError:
+            print("Supabase create_user JSON decode error. Raw:", resp.text)
 
-    # لو رجع body وفيه id نستخدمه
     if data and isinstance(data, list) and data and "id" in data[0]:
         return str(data[0]["id"])
 
@@ -205,7 +230,7 @@ def create_user(name: str, email: str, phone: Optional[str]) -> str:
     print("Supabase create_user: no id returned at all. Response:", resp.status_code, resp.text)
     raise HTTPException(
         status_code=500,
-        detail="Supabase error: could not retrieve user id after create_user",
+        detail=f"Supabase error: could not retrieve user id after create_user. Raw response: {resp.text}",
     )
 
 
@@ -219,10 +244,22 @@ def update_user(user_id: str, name: str, phone: Optional[str]) -> None:
     url = f"{SUPABASE_REST_URL}/users"
     params = {"id": f"eq.{user_id}"}
     payload = {"name": name, "phone": phone}
-    resp = requests.patch(url, headers=supabase_headers(), params=params, json=payload)
+    try:
+        resp = requests.patch(
+            url, headers=supabase_headers(), params=params, json=payload, timeout=10
+        )
+    except Exception as e:
+        print("Supabase update_user REQUEST ERROR:", repr(e))
+        raise HTTPException(
+            status_code=500, detail=f"Supabase update_user request error: {repr(e)}"
+        )
+
     if not resp.ok:
         print("Supabase update_user ERROR:", resp.status_code, resp.text)
-        raise HTTPException(status_code=500, detail="Supabase error (update user)")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Supabase update_user HTTP {resp.status_code}: {resp.text}",
+        )
 
 
 def insert_assessment(
@@ -250,11 +287,21 @@ def insert_assessment(
             "ai_report": ai_report,
         }
     ]
-    resp = requests.post(url, headers=supabase_headers(), json=payload)
+    try:
+        resp = requests.post(
+            url, headers=supabase_headers(), json=payload, timeout=10
+        )
+    except Exception as e:
+        print("Supabase insert_assessment REQUEST ERROR:", repr(e))
+        raise HTTPException(
+            status_code=500, detail=f"Supabase insert_assessment request error: {repr(e)}"
+        )
+
     if not resp.ok:
         print("Supabase insert_assessment ERROR:", resp.status_code, resp.text)
         raise HTTPException(
-            status_code=500, detail="Supabase error (insert assessment)"
+            status_code=500,
+            detail=f"Supabase insert_assessment HTTP {resp.status_code}: {resp.text}",
         )
 
 
@@ -271,14 +318,27 @@ def fetch_profile_from_supabase(user_id: str) -> UserProfile:
         "select": "id,name,email,phone",
         "id": f"eq.{user_id}",
     }
-    resp_user = requests.get(url_user, headers=supabase_headers(), params=params_user)
+    try:
+        resp_user = requests.get(
+            url_user, headers=supabase_headers(), params=params_user, timeout=10
+        )
+    except Exception as e:
+        print("Supabase fetch_profile user REQUEST ERROR:", repr(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Supabase fetch_profile user request error: {repr(e)}",
+        )
+
     if not resp_user.ok:
         print(
             "Supabase fetch_profile user ERROR:",
             resp_user.status_code,
             resp_user.text,
         )
-        raise HTTPException(status_code=500, detail="Supabase error (get user)")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Supabase fetch_profile user HTTP {resp_user.status_code}: {resp_user.text}",
+        )
 
     user_data = resp_user.json()
     if not user_data:
@@ -293,9 +353,17 @@ def fetch_profile_from_supabase(user_id: str) -> UserProfile:
         "user_id": f"eq.{user_id}",
         "order": "created_at.desc",
     }
-    resp_assess = requests.get(
-        url_assess, headers=supabase_headers(), params=params_assess
-    )
+    try:
+        resp_assess = requests.get(
+            url_assess, headers=supabase_headers(), params=params_assess, timeout=10
+        )
+    except Exception as e:
+        print("Supabase fetch_profile assessments REQUEST ERROR:", repr(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Supabase fetch_profile assessments request error: {repr(e)}",
+        )
+
     if not resp_assess.ok:
         print(
             "Supabase fetch_profile assessments ERROR:",
@@ -303,7 +371,8 @@ def fetch_profile_from_supabase(user_id: str) -> UserProfile:
             resp_assess.text,
         )
         raise HTTPException(
-            status_code=500, detail="Supabase error (get assessments)"
+            status_code=500,
+            detail=f"Supabase fetch_profile assessments HTTP {resp_assess.status_code}: {resp_assess.text}",
         )
 
     rows = resp_assess.json() or []
@@ -343,7 +412,6 @@ def get_openai_client() -> OpenAI:
     try:
         return OpenAI(api_key=OPENAI_API_KEY)
     except TypeError as e:
-        # هنا لو رجع نفس خطأ proxies راح يبان في اللوق لكن ما يطيح السيرفر أثناء الـ import
         print("OpenAI client init error:", repr(e))
         raise HTTPException(
             status_code=500,
@@ -437,7 +505,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # بعدين حصرها على دومين الفرونت
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -456,20 +524,27 @@ def root():
 @app.post("/signup-lite", response_model=SignupResponse)
 def signup_lite(payload: SignupPayload):
     try:
+        print("📩 signup-lite payload:", payload.dict())
         existing = get_user_by_email(payload.email)
         if existing:
+            print("🟡 Existing user:", existing)
             update_user(existing["id"], payload.name, payload.phone)
             return {"userId": existing["id"]}
 
         user_id = create_user(payload.name, payload.email, payload.phone)
+        print("🟢 New user id:", user_id)
         return {"userId": user_id}
 
-    except HTTPException:
-        raise
+    except HTTPException as http_ex:
+        # نطبع ونرجع نفس الرسالة للفرونت
+        print("🚨 HTTPException in signup-lite:", http_ex.detail)
+        raise http_ex
     except Exception as e:
-        # عشان لو صار خطأ ثاني يطلع في اللوق
-        print("signup_lite UNEXPECTED ERROR:", repr(e))
-        raise HTTPException(status_code=500, detail="Unexpected error in signup-lite")
+        print("💥 signup_lite UNEXPECTED ERROR:", repr(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Signup-lite internal error: {repr(e)}",
+        )
 
 
 # 2) /analyze  -> تحليل + حفظ نتيجة الاختبار (لو فيه userId)
@@ -482,7 +557,6 @@ async def analyze_endpoint(payload: AnalyzePayload):
         answers=answers_list,
     )
 
-    # لو فيه userId نحفظ الاختبار في جدول assessments
     try:
         if payload.userId:
             insert_assessment(
@@ -497,7 +571,7 @@ async def analyze_endpoint(payload: AnalyzePayload):
         raise
     except Exception as e:
         print("insert_assessment UNEXPECTED ERROR:", repr(e))
-        # ما نوقف اليوزر عن الحصول على النتيجة، بس نسجّل اللّوغ
+        # ما نوقف اليوزر عن الحصول على النتيجة
 
     return result
 
@@ -512,7 +586,7 @@ async def get_profile(user_id: str):
         raise
     except Exception as e:
         print("get_profile UNEXPECTED ERROR:", repr(e))
-        raise HTTPException(status_code=500, detail="Unexpected error in profile")
+        raise HTTPException(status_code=500, detail=f"Unexpected error in profile: {repr(e)}")
 
 
 # للتشغيل المحلي: python main.py

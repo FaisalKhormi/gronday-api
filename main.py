@@ -3,12 +3,12 @@ from typing import List, Dict, Optional
 import os
 from datetime import datetime
 
+import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from openai import OpenAI
-from supabase import create_client, Client
 
 # =========================================
 # تحميل المتغيرات من .env (محلياً) + بيئة Render
@@ -26,7 +26,16 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
     raise RuntimeError("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is not set.")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+# REST base URL for Supabase
+SUPABASE_REST_URL = SUPABASE_URL.rstrip("/") + "/rest/v1"
+
+SUPABASE_HEADERS = {
+    "apikey": SUPABASE_SERVICE_ROLE_KEY,
+    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+    "Content-Type": "application/json",
+    "Prefer": "return=representation",
+}
 
 # =========================================
 # بيانات الـ Benchmark (ممكن تطورها لاحقاً)
@@ -108,6 +117,34 @@ class UserProfile(BaseModel):
 
 
 # =========================================
+# توابع مساعدة للتعامل مع Supabase REST
+# =========================================
+def _sb_get(table: str, params: Dict[str, str]) -> List[Dict]:
+    url = f"{SUPABASE_REST_URL}/{table}"
+    resp = requests.get(url, headers=SUPABASE_HEADERS, params=params, timeout=10)
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=500, detail=f"Supabase GET error: {resp.text}")
+    return resp.json()
+
+
+def _sb_post(table: str, data: Dict) -> List[Dict]:
+    url = f"{SUPABASE_REST_URL}/{table}"
+    resp = requests.post(url, headers=SUPABASE_HEADERS, json=data, timeout=10)
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=500, detail=f"Supabase POST error: {resp.text}")
+    return resp.json()
+
+
+def _sb_patch(table: str, filters: Dict[str, str], data: Dict) -> List[Dict]:
+    url = f"{SUPABASE_REST_URL}/{table}"
+    params = {k: f"eq.{v}" for k, v in filters.items()}
+    resp = requests.patch(url, headers=SUPABASE_HEADERS, params=params, json=data, timeout=10)
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=500, detail=f"Supabase PATCH error: {resp.text}")
+    return resp.json()
+
+
+# =========================================
 # منطق التحليل + استدعاء GPT
 # =========================================
 def analyze_user(name: str, track: str, answers: List[Dict]) -> Dict:
@@ -181,7 +218,7 @@ def analyze_user(name: str, track: str, answers: List[Dict]) -> Dict:
 # =========================================
 app = FastAPI(
     title="Growday API",
-    version="1.1.0",
+    version="1.2.0",
     description="Backend for Growday AI Skill Assessment + user profiles",
 )
 
@@ -206,40 +243,37 @@ def root():
 @app.post("/signup-lite", response_model=SignupResponse)
 def signup_lite(payload: SignupPayload):
     # نبحث عن مستخدم بنفس الإيميل
-    existing = (
-        supabase.table("users")
-        .select("id")
-        .eq("email", payload.email)
-        .maybe_single()
-        .execute()
+    existing_rows = _sb_get(
+        "users",
+        {
+            "select": "id",
+            "email": f"eq.{payload.email}",
+            "limit": "1",
+        },
     )
-
-    data = existing.data
-    if data:
-        user_id = data["id"]
+    if existing_rows:
+        user_id = existing_rows[0]["id"]
         # نحدّث الاسم/الجوال لو تغيّروا
-        supabase.table("users").update(
-            {"name": payload.name, "phone": payload.phone}
-        ).eq("id", user_id).execute()
+        _sb_patch(
+            "users",
+            {"id": user_id},
+            {"name": payload.name, "phone": payload.phone},
+        )
         return {"userId": user_id}
 
     # لو ما حصلناه، ننشئ مستخدم جديد
-    res = (
-        supabase.table("users")
-        .insert(
-            {
-                "name": payload.name,
-                "email": payload.email,
-                "phone": payload.phone,
-            }
-        )
-        .execute()
+    inserted = _sb_post(
+        "users",
+        {
+            "name": payload.name,
+            "email": payload.email,
+            "phone": payload.phone,
+        },
     )
-
-    if not res.data:
+    if not inserted:
         raise HTTPException(status_code=500, detail="Failed to create user")
 
-    user_id = res.data[0]["id"]
+    user_id = inserted[0]["id"]
     return {"userId": user_id}
 
 
@@ -255,14 +289,15 @@ async def analyze_endpoint(payload: AnalyzePayload):
 
     # لو فيه userId نحفظ الاختبار في جدول assessments
     if payload.userId:
-        supabase.table("assessments").insert(
+        _sb_post(
+            "assessments",
             {
                 "user_id": payload.userId,
                 "track": payload.track,
                 "overall_score": result["overallScore"],
                 "skill_scores": result["skillScores"],
-            }
-        ).execute()
+            },
+        )
 
     return result
 
@@ -270,31 +305,35 @@ async def analyze_endpoint(payload: AnalyzePayload):
 # 3) /profile/{user_id}  -> يرجّع بروفايل العميل + قائمة اختبارات
 @app.get("/profile/{user_id}", response_model=UserProfile)
 async def get_profile(user_id: str):
-    user_res = (
-        supabase.table("users")
-        .select("id,name,email,phone")
-        .eq("id", user_id)
-        .single()
-        .execute()
+    user_rows = _sb_get(
+        "users",
+        {
+            "select": "id,name,email,phone",
+            "id": f"eq.{user_id}",
+            "limit": "1",
+        },
     )
-    user = user_res.data
-    if not user:
+    if not user_rows:
         raise HTTPException(status_code=404, detail="User not found")
 
-    assessments_res = (
-        supabase.table("assessments")
-        .select("id,track,overall_score,skill_scores,created_at")
-        .eq("user_id", user_id)
-        .order("created_at", desc=True)
-        .execute()
+    user = user_rows[0]
+
+    assessments_rows = _sb_get(
+        "assessments",
+        {
+            "select": "id,track,overall_score,skill_scores,created_at",
+            "user_id": f"eq.{user_id}",
+            "order": "created_at.desc",
+        },
     )
-    rows = assessments_res.data or []
 
     assessments: List[AssessmentSummary] = []
-    for row in rows:
+    for row in assessments_rows:
         created_raw = row["created_at"]
-        # Supabase يعيد ISO string مثل "2025-11-05T21:00:00.000Z"
-        created_at = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+        # Supabase يعيد ISO string مثل "2025-11-05T21:00:00.000000+00:00" أو "...Z"
+        created_at = datetime.fromisoformat(
+            created_raw.replace("Z", "+00:00")
+        )
         assessments.append(
             AssessmentSummary(
                 id=row["id"],

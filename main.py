@@ -32,15 +32,16 @@ if missing_vars:
     print("WARNING: Missing environment variables:", ", ".join(missing_vars))
 
 # REST base URL (لو ما فيه SUPABASE_URL نخليه فاضي ونتعامل معه داخل الفنكشنز)
-SUPABASE_REST_URL = (
-    SUPABASE_URL.rstrip("/") + "/rest/v1" if SUPABASE_URL else ""
-)
+SUPABASE_REST_URL = SUPABASE_URL.rstrip("/") + "/rest/v1" if SUPABASE_URL else ""
 
 
+# =========================================
+# Supabase helpers
+# =========================================
 def supabase_headers() -> Dict[str, str]:
     """
     يرجع الهيدرز الجاهزة لـ Supabase REST.
-    لو المتغيرات ناقصة يرجع Error واضح بدل ما يطيح السيرفر.
+    نضيف Prefer:return=representation عشان POST يرجع الصف المدخَل (id, ...).
     """
     if not SUPABASE_SERVICE_ROLE_KEY or not SUPABASE_REST_URL:
         raise HTTPException(
@@ -53,6 +54,7 @@ def supabase_headers() -> Dict[str, str]:
         "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
         "Content-Type": "application/json",
         "Accept": "application/json",
+        "Prefer": "return=representation",  # مهم عشان create_user يرجع id
     }
 
 
@@ -162,6 +164,11 @@ def get_user_by_email(email: str) -> Optional[Dict]:
 
 
 def create_user(name: str, email: str, phone: Optional[str]) -> str:
+    """
+    ينشئ مستخدم جديد في جدول users.
+    يحاول الحصول على id من رد Supabase، ولو ما رجع، يرجع يجيب المستخدم عن طريق الإيميل.
+    هذا يمنع الكراش اللي كان يسوي 500 في signup-lite.
+    """
     if not SUPABASE_REST_URL:
         raise HTTPException(
             status_code=500,
@@ -171,12 +178,35 @@ def create_user(name: str, email: str, phone: Optional[str]) -> str:
     url = f"{SUPABASE_REST_URL}/users"
     payload = [{"name": name, "email": email, "phone": phone}]
     resp = requests.post(url, headers=supabase_headers(), json=payload)
+
     if not resp.ok:
         print("Supabase create_user ERROR:", resp.status_code, resp.text)
         raise HTTPException(status_code=500, detail="Supabase error (create user)")
 
-    data = resp.json()
-    return data[0]["id"]
+    # نحاول نقرأ JSON بأمان
+    data = None
+    try:
+        if resp.text.strip():
+            data = resp.json()
+    except ValueError:
+        # ما قدر يفك JSON، نطبع الرد الخام
+        print("Supabase create_user JSON decode error. Raw response:", resp.text)
+
+    # لو رجع body وفيه id نستخدمه
+    if data and isinstance(data, list) and data and "id" in data[0]:
+        return str(data[0]["id"])
+
+    # fallback: نجيب المستخدم عن طريق الإيميل لو الإنسرشن نجح بس ما رجع body
+    fallback_user = get_user_by_email(email)
+    if fallback_user and "id" in fallback_user:
+        print("Supabase create_user: used fallback get_user_by_email")
+        return str(fallback_user["id"])
+
+    print("Supabase create_user: no id returned at all. Response:", resp.status_code, resp.text)
+    raise HTTPException(
+        status_code=500,
+        detail="Supabase error: could not retrieve user id after create_user",
+    )
 
 
 def update_user(user_id: str, name: str, phone: Optional[str]) -> None:

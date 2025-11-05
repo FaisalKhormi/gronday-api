@@ -19,7 +19,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")  # example: https://xxxx.supabase.co
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
-# بدل ما نطيّح السيرفر بـ RuntimeError، نطبع تحذير فقط
+# بس نطبع تحذير لو في شي ناقص، ما نطيح السيرفر
 missing_vars = []
 if not OPENAI_API_KEY:
     missing_vars.append("OPENAI_API_KEY")
@@ -35,13 +35,6 @@ if missing_vars:
 SUPABASE_REST_URL = (
     SUPABASE_URL.rstrip("/") + "/rest/v1" if SUPABASE_URL else ""
 )
-
-# نهيّئ عميل OpenAI لو المفتاح موجود
-client: Optional[OpenAI]
-if OPENAI_API_KEY:
-    client = OpenAI(api_key=OPENAI_API_KEY)
-else:
-    client = None
 
 
 def supabase_headers() -> Dict[str, str]:
@@ -64,7 +57,7 @@ def supabase_headers() -> Dict[str, str]:
 
 
 # =========================================
-# بيانات الـ Benchmark (ممكن تطورها لاحقاً)
+# بيانات الـ Benchmark
 # =========================================
 BENCHMARKS: Dict[str, Dict[str, int]] = {
     "Data Analyst": {
@@ -309,17 +302,33 @@ def fetch_profile_from_supabase(user_id: str) -> UserProfile:
 
 
 # =========================================
+# OpenAI helper: تهيئة العميل وقت الحاجة فقط
+# =========================================
+def get_openai_client() -> OpenAI:
+    if not OPENAI_API_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="Server configuration error: OPENAI_API_KEY is missing.",
+        )
+    try:
+        return OpenAI(api_key=OPENAI_API_KEY)
+    except TypeError as e:
+        # هنا لو رجع نفس خطأ proxies راح يبان في اللوق لكن ما يطيح السيرفر أثناء الـ import
+        print("OpenAI client init error:", repr(e))
+        raise HTTPException(
+            status_code=500,
+            detail="OpenAI client init error. Please contact support.",
+        )
+
+
+# =========================================
 # منطق التحليل + استدعاء GPT
 # =========================================
 def analyze_user(name: str, track: str, answers: List[Dict]) -> Dict:
     """
     answers: list of {"text": "..", "skill": "Technical", "score": 1..5}
     """
-    if client is None:
-        raise HTTPException(
-            status_code=500,
-            detail="Server configuration error: OPENAI_API_KEY is missing.",
-        )
+    client = get_openai_client()
 
     # 1) تجميع الدرجات لكل skill
     buckets: Dict[str, List[int]] = {}
@@ -451,9 +460,7 @@ async def analyze_endpoint(payload: AnalyzePayload):
                 track=payload.track,
                 overall_score=result["overallScore"],
                 skill_scores=result["skillScores"],
-                bench_scores=result["BenchScores"]
-                if "BenchScores" in result
-                else result["benchScores"],
+                bench_scores=result["benchScores"],
                 ai_report=result["aiReport"],
             )
     except HTTPException:
